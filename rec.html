@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Custom Volume Boost Monitor & Recorder</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+            text-align: center;
+        }
+        button {
+            padding: 10px 20px;
+            font-size: 16px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            margin: 10px;
+        }
+        button:disabled {
+            background-color: #cccccc;
+        }
+        #downloadBtn {
+            background-color: #2196F3;
+        }
+        .status {
+            margin: 20px 0;
+            padding: 10px;
+            border-radius: 4px;
+        }
+        .active {
+            background-color: #dff0d8;
+            color: #3c763d;
+        }
+        .inactive {
+            background-color: #f2dede;
+            color: #a94442;
+        }
+        .recording {
+            background-color: #ffeb3b;
+            color: #ff9800;
+        }
+        .timer {
+            font-size: 24px;
+            margin: 15px 0;
+            font-family: monospace;
+        }
+        .settings {
+            margin: 20px 0;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            text-align: left;
+        }
+        .volume-warning {
+            color: #ff5722;
+            font-weight: bold;
+            margin: 10px 0;
+        }
+        .boost-selector {
+            margin: 15px 0;
+        }
+        .boost-selector label {
+            font-weight: bold;
+        }
+        .boost-selector select {
+            padding: 5px;
+            font-size: 16px;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+    <h1>🎚️ Custom Volume Boost Monitor</h1>
+    <p>Select a boost level (1× to 5×) for real-time monitoring while recording at normal volume.</p>
+    
+    <div class="volume-warning">
+        ⚠️ <span id="boostWarning">Selected: 1× (No Boost)</span>
+    </div>
+    
+    <div id="status" class="status inactive">
+        Status: Not active
+    </div>
+    
+    <div id="timer" class="timer">00:00:00</div>
+    
+    <div class="boost-selector">
+        <label for="boostLevel">🎚️ Monitoring Volume Boost: </label>
+        <select id="boostLevel">
+            <option value="1">1× (Normal)</option>
+            <option value="2">2×</option>
+            <option value="3">3×</option>
+            <option value="4">4×</option>
+            <option value="5">5× (Max)</option>
+        </select>
+    </div>
+    
+    <button id="startBtn">▶️ Start Monitoring</button>
+    <button id="stopBtn" disabled>⏹️ Stop</button>
+    <button id="downloadBtn" disabled>💾 Download Recording</button>
+    
+    <div class="settings">
+        <h3>⚙️ Audio Settings</h3>
+        <div>
+            <label for="fileFormat">Format: </label>
+            <select id="fileFormat">
+                <option value="wav">WAV (Best Quality)</option>
+                <option value="mp3">MP3 (Smaller File)</option>
+                <option value="ogg">OGG (Web Optimized)</option>
+            </select>
+        </div>
+        <div>
+            <label for="noiseSuppression">🔇 Noise Suppression: </label>
+            <input type="checkbox" id="noiseSuppression" checked>
+        </div>
+    </div>
+    
+    <!-- RecordRTC for audio recording -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/RecordRTC/5.6.2/RecordRTC.min.js"></script>
+    
+    <script>
+        const startBtn = document.getElementById('startBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const downloadBtn = document.getElementById('downloadBtn');
+        const statusDiv = document.getElementById('status');
+        const timerDiv = document.getElementById('timer');
+        const fileFormat = document.getElementById('fileFormat');
+        const noiseSuppression = document.getElementById('noiseSuppression');
+        const boostLevel = document.getElementById('boostLevel');
+        const boostWarning = document.getElementById('boostWarning');
+        
+        let audioContext;
+        let microphone;
+        let audioStream;
+        let recorder;
+        let startTime;
+        let timerInterval;
+        let audioChunks = [];
+        let monitorGain;
+        
+        // Update boost warning text
+        boostLevel.addEventListener('change', () => {
+            const boost = boostLevel.value;
+            boostWarning.textContent = `Selected: ${boost}× ${boost > 1 ? '(Loud!)' : '(Normal)'}`;
+        });
+        
+        async function startMonitoring() {
+            try {
+                const selectedBoost = parseFloat(boostLevel.value);
+                
+                // 🎤 Get microphone access (disable AGC & Echo Cancellation for better control)
+                audioStream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        noiseSuppression: noiseSuppression.checked,
+                        echoCancellation: false,
+                        autoGainControl: false,
+                        sampleRate: 48000
+                    },
+                    video: false
+                });
+                
+                // 🔊 Create AudioContext
+                audioContext = new (window.AudioContext || window.webkitAudioContext)({
+                    latencyHint: 'interactive'
+                });
+                
+                // 🎛️ Create microphone source
+                microphone = audioContext.createMediaStreamSource(audioStream);
+                
+                // 🔀 Split audio into two paths: Monitoring (boosted) & Recording (normal)
+                const splitter = audioContext.createChannelSplitter(2);
+                microphone.connect(splitter);
+                
+                // 🔊 MONITORING PATH (Custom Boost)
+                monitorGain = audioContext.createGain();
+                monitorGain.gain.value = selectedBoost;  // Apply selected boost
+                splitter.connect(monitorGain, 0);
+                monitorGain.connect(audioContext.destination);
+                
+                // ⏺️ RECORDING PATH (Normal Volume)
+                const recordingDest = audioContext.createMediaStreamDestination();
+                splitter.connect(recordingDest, 1);
+                
+                // ⏺️ Initialize recorder
+                recorder = new RecordRTC(recordingDest.stream, {
+                    type: 'audio',
+                    mimeType: getMimeType(),
+                    recorderType: RecordRTC.StereoAudioRecorder,
+                    desiredSampRate: 48000,
+                    numberOfAudioChannels: 1,
+                    timeSlice: 1000,
+                    ondataavailable: (blob) => {
+                        audioChunks.push(blob);
+                    }
+                });
+                
+                // ⏺️ Start recording
+                recorder.startRecording();
+                
+                // ⏱️ Start timer
+                startTime = Date.now();
+                updateTimer();
+                timerInterval = setInterval(updateTimer, 1000);
+                
+                // 🖥️ Update UI
+                startBtn.disabled = true;
+                stopBtn.disabled = false;
+                downloadBtn.disabled = true;
+                statusDiv.textContent = `Status: 🔊 Monitoring (${selectedBoost}× Boost) & Recording`;
+                statusDiv.className = 'status recording';
+                
+                console.log(`🎤 Monitoring at ${selectedBoost}× | Recording at 1×`);
+            } catch (error) {
+                console.error('❌ Error:', error);
+                statusDiv.textContent = `Error: ${error.message}`;
+                statusDiv.className = 'status inactive';
+            }
+        }
+        
+        function stopMonitoring() {
+            // ⏹️ Stop recording
+            if (recorder) {
+                recorder.stopRecording(() => {
+                    const blob = recorder.getBlob();
+                    audioChunks = [blob];
+                    prepareDownload(blob);
+                });
+            }
+            
+            // ⏹️ Stop timer
+            clearInterval(timerInterval);
+            
+            // 🎤 Release microphone
+            if (audioStream) {
+                audioStream.getTracks().forEach(track => track.stop());
+            }
+            
+            // 🔇 Close audio context
+            if (audioContext) {
+                audioContext.close();
+            }
+            
+            // 🖥️ Update UI
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+            downloadBtn.disabled = false;
+            statusDiv.textContent = 'Status: ✅ Ready to Download';
+            statusDiv.className = 'status active';
+        }
+        
+        function prepareDownload(blob) {
+            const url = URL.createObjectURL(blob);
+            downloadBtn.onclick = () => {
+                const fileName = `recording_${new Date().toISOString().replace(/[:.]/g, '-')}.${fileFormat.value}`;
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = fileName;
+                a.click();
+                URL.revokeObjectURL(url);
+            };
+        }
+        
+        function updateTimer() {
+            const elapsed = Math.floor((Date.now() - startTime) / 1000);
+            const hours = Math.floor(elapsed / 3600).toString().padStart(2, '0');
+            const minutes = Math.floor((elapsed % 3600) / 60).toString().padStart(2, '0');
+            const seconds = (elapsed % 60).toString().padStart(2, '0');
+            timerDiv.textContent = `${hours}:${minutes}:${seconds}`;
+        }
+        
+        function getMimeType() {
+            switch(fileFormat.value) {
+                case 'mp3': return 'audio/mpeg';
+                case 'ogg': return 'audio/ogg';
+                case 'wav': 
+                default: return 'audio/wav';
+            }
+        }
+        
+        // 🎮 Button Events
+        startBtn.addEventListener('click', startMonitoring);
+        stopBtn.addEventListener('click', stopMonitoring);
+    </script>
+</body>
+</html>
